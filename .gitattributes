@@ -1,0 +1,7 @@
+# 统一 LF，除了必须保留原始字节的 Windows 脚本。
+# 这些文件里的 BOM 和 CRLF 是功能性的（见 README 坑 1/坑 2），
+# 一旦被换行规范化改写就会坏掉；用 -text 让 git 原样存储。
+* text=auto eol=lf
+*.bat -text
+*.cmd -text
+*.ps1 -text

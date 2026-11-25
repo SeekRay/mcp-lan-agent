@@ -1,0 +1,23 @@
+{
+  "name": "pc-agent-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LAN 上的一台 Windows PC 暴露文件/终端/后台任务能力的 MCP Server",
+  "type": "module",
+  "main": "server.mjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "smoke": "node smoke-test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0"
+  }
+}
