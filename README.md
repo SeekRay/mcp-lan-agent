@@ -203,6 +203,56 @@ What it does **not** protect against:
 
 ---
 
+## Cost model: where the work runs, and what it costs
+
+### Hardware
+
+| Resource | Host | Worker |
+|---|---|---|
+| CPU / GPU | ~0 | all of the child process |
+| Memory | a few MB (transport) | ~90 MB idle server + child process |
+| Disk | session log | all file I/O |
+| Network | a few KB per request | same |
+
+Every heavy operation — render, transcode, compile, batch convert — runs on the worker. The host only relays JSON-RPC: milliseconds of CPU and a few MB of memory per call, and nothing at all while a background job runs.
+
+That is the point of the design: **the worker is the only bottleneck.** Upgrading the host buys you nothing — unless the host is also running the model.
+
+> The one exception: put the model on the host (Ollama, MLX) and the bottleneck moves back — inference usually costs more than the job you dispatched.
+
+### Tokens, if you pay for the model
+
+The eight tool schemas are re-sent on every turn: **4,350 bytes ≈ 1,100 tokens**. On top of that, every byte a tool returns lands in the host's context.
+
+```
+extra tokens ≈ 1,100 × turns + returnedBytes / 4
+```
+
+**Worth dispatching**
+
+- Long CPU-bound jobs: renders, encodes, compiles, bulk conversions — small logs, long runtime
+- Anything that needs Windows-only software, a GPU, or a toolchain you do not have locally
+- Generating large files that stay on the worker
+- Recurring jobs started with `spawn_job` and checked later
+
+**Better kept on the host**
+
+- Reading many files — a hundred files of text over the wire costs more than reading them locally
+- Iterative search and grep: search where the text already is
+- Tight edit → run → inspect loops repeated a dozen times; round trips plus the schema tax add up
+- Enumerating large directory trees
+- Anything where you need to see a lot of intermediate output
+
+The rule: **send compute, not data.**
+
+The default ceilings exist for exactly this: `PC_AGENT_MAX_OUTPUT` (200 KB ≈ 50k tokens) and `job_status`'s `tailBytes` (64 KB). Lower both if your context window is precious.
+
+### Prefer a local model?
+
+Then the token bill disappears and the cost moves to the host's compute. Usually worth doing — with one honest caveat: **small local models are markedly less reliable at multi-step tool use.** A wrong tool call that has to be retried costs more than the tokens it saved. Measure before committing.
+
+---
+
 ## Design notes
 
 **Why stateless?** A fresh transport per request (`sessionIdGenerator: undefined`). You give up long-lived subscriptions (`subscriptions/listen`); you gain automatic recovery when the worker reboots, crashes, or the network blips — no reconnect handshake involved. For a machine that shuts down, that trade is worth it.
