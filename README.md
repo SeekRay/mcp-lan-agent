@@ -2,15 +2,7 @@
 
 把一台 Windows（或 Linux/macOS）机器变成局域网里的 **MCP Agent** —— 让 AI 宿主（DeepSeek Harness、Claude Code、Claude Desktop 等）能在那台机器上读写文件、执行命令、跑几分钟以上的渲染任务。
 
-```
-宿主机器（Mac / 笔记本）                       执行机器（Windows PC / 闲置服务器）
-┌────────────────────────┐                  ┌──────────────────────────────┐
-│ 模型（DeepSeek / Claude）│                  │ pc-agent  (Node, 无状态)      │
-│ MCP Client              │  Streamable HTTP │  ├ 文件读写（路径围栏）        │
-│   mcp__pc__*            │ ───────────────▶ │  ├ 前台命令 / 后台任务         │
-└────────────────────────┘  192.168.x.x:40000│  └ 走 Windows 本地命令、FFmpeg │
-                                             └──────────────────────────────┘
-```
+![局域网 MCP Agent 架构](docs/architecture.zh.svg)
 
 > **这是一份踩坑笔记 + 一个参考实现，不是一个产品。** 我们把它发布出来，是因为"在 Windows 上把 MCP 服务跑成开机自启、且中文不乱码"这件事的资料很少，而我们为此花了半天。代码给到能跑的程度，但不承诺维护，也不接 feature request。
 
@@ -341,6 +333,7 @@ npm error It's possible that the file was already in use (by a text editor or an
 | `install-autostart.ps1` | 计划任务（`-AtStartup` / `-AsSystem`）+ 防火墙 + `-Uninstall` |
 | `smoke-test.mjs` | 端到端自检，按对端平台选命令 |
 | `.gitattributes` | 保持 `.bat` / `.ps1` 的原始字节（BOM 与 CRLF 不能丢） |
+| `docs/architecture.*.svg` | 架构图（中 / 英），README 顶部引用 |
 
 ## 验证状态
 

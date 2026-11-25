@@ -2,15 +2,7 @@
 
 Run a **Windows (or Linux/macOS) machine as a LAN MCP agent** — let an AI host (DeepSeek Harness, Claude Code, Claude Desktop) read and write files, run commands, and start long background jobs on a second machine.
 
-```
-Host (Mac / laptop)                        Worker (Windows PC / spare server)
-┌────────────────────────┐                ┌──────────────────────────────┐
-│ model (DeepSeek/Claude)│                │ pc-agent  (Node, stateless)   │
-│ MCP client             │ Streamable HTTP│  ├ file read/write (jailed)   │
-│   mcp__pc__*           │ ──────────────▶│  ├ foreground / background cmd│
-└────────────────────────┘  192.168.x.x:40000 └ local programs, FFmpeg    │
-                                          └──────────────────────────────┘
-```
+![LAN MCP agent architecture](docs/architecture.en.svg)
 
 > **These are deployment notes plus a reference implementation, not a product.** We publish it because "make an MCP server auto-start on Windows *and* keep Chinese output readable" is barely documented anywhere, and it cost us half a day. The code works; it is not maintained and accepts no feature requests.
 
