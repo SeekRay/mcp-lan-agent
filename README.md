@@ -1,57 +1,51 @@
 # mcp-lan-agent
 
-把一台 Windows（或 Linux/macOS）机器变成局域网里的 **MCP Agent** —— 让 AI 宿主（DeepSeek Harness、Claude Code、Claude Desktop 等）能在那台机器上读写文件、执行命令、跑几分钟以上的渲染任务。
+**English** ｜ [简体中文](README.zh-CN.md)
 
-![局域网 MCP Agent 架构](docs/architecture.zh.svg)
+Run a **Windows (or Linux/macOS) machine as a LAN MCP agent** — let an AI host (DeepSeek Harness, Claude Code, Claude Desktop) read and write files, run commands, and start long background jobs on a second machine.
 
-> **这是一份踩坑笔记 + 一个参考实现，不是一个产品。** 我们把它发布出来，是因为"在 Windows 上把 MCP 服务跑成开机自启、且中文不乱码"这件事的资料很少，而我们为此花了半天。代码给到能跑的程度，但不承诺维护，也不接 feature request。
+![LAN MCP agent architecture](docs/architecture.en.svg)
 
----
-
-## 为什么要有它
-
-大多数 MCP server 是 stdio 模式、跑在宿主本机。当你有一台**闲置但性能更好、或者装着特定工具链**的机器时，把它变成 HTTP 服务端更合理：
-
-- 渲染、转码、批处理这类重活扔过去，宿主保持轻量
-- 一台机器可以服务多个宿主
-- 那台机器关机、重启、睡眠，宿主这边只少一组工具，不会崩
-
-代价是：**你等于把一台机器的 shell 交给了模型。** 请先读完[安全模型](#安全模型)。
+> **These are deployment notes plus a reference implementation, not a product.** We publish it because "make an MCP server auto-start on Windows *and* keep Chinese output readable" is barely documented anywhere, and it cost us half a day. The code works; it is not maintained and accepts no feature requests.
 
 ---
 
-## 快速开始
+## Why
 
-### 1. 执行机器：装 Node
+Most MCP servers use stdio and run on the host itself. When you have a spare machine that is faster, or that has a specific toolchain installed, making it an HTTP server is more sensible:
+
+- push renders, transcodes and batch jobs to it; the host stays light
+- one machine can serve several hosts
+- if it reboots, sleeps, or shuts down, the host only loses a group of tools — nothing crashes
+
+The price: **you are handing the model a shell on that machine.** Read [Security](#security) first.
+
+---
+
+## Quick start
+
+**1. Install Node ≥ 20 on the worker**
 
 ```powershell
 winget install OpenJS.NodeJS.LTS
 ```
 
-要求 **Node ≥ 20**。装完重开终端，`node -v` 确认。
+Dependencies are pure JavaScript — `npm install` needs no Python, no Visual Studio Build Tools, no native compilation. You can skip the "Tools for Native Modules" checkbox in the installer.
 
-> 本项目依赖全是纯 JavaScript，`npm install` **不需要** Python、Visual Studio Build Tools 或任何原生编译。Node 安装器最后那个「Tools for Native Modules」选项可以跳过。
-
-### 2. 部署
-
-把仓库拷到执行机器（例如 `D:\pc-agent`），**不要拷 `node_modules`**：
+**2. Deploy**
 
 ```powershell
 cd D:\pc-agent
 npm install
 ```
 
-### 3. 配置
+**3. Configure**
 
 ```powershell
 $b = New-Object byte[] 32
 ([Security.Cryptography.RandomNumberGenerator]::Create()).GetBytes($b)
 $t = [Convert]::ToBase64String($b)
-```
 
-> 注意用 `::Create()` 实例写法。`RandomNumberGenerator::GetBytes(32)` 这个**静态重载只存在于 .NET Core**，Windows 自带的 PowerShell 5.1 会报「不包含名为 GetBytes 的方法」。
-
-```powershell
 $env_text = @"
 PC_AGENT_HOST=0.0.0.0
 PC_AGENT_PORT=40000
@@ -61,72 +55,58 @@ PC_AGENT_ALLOWED_HOSTS=192.168.1.50,localhost,127.0.0.1,[::1],$env:COMPUTERNAME
 PC_AGENT_ALLOWED_IPS=192.168.1.10
 "@
 [IO.File]::WriteAllText("$PWD\.env", $env_text, (New-Object Text.UTF8Encoding($false)))
-New-Item -ItemType Directory -Force -Path D:\work | Out-Null
 ```
 
-> 必须用 `[IO.File]::WriteAllText` 配 `UTF8Encoding($false)`。`Set-Content -Encoding utf8` 在 PS 5.1 下会写 BOM，而 BOM 会让 `.env` 第一行的键名变成 `\uFEFFPC_AGENT_HOST`，服务读不到。
+Two details that matter:
 
-### 4. 启动并验证
+- `::Create().GetBytes($b)`, **not** the static `RandomNumberGenerator::GetBytes(32)` — the static overload only exists in .NET Core, and Windows PowerShell 5.1 is .NET Framework. It throws *"does not contain a method named GetBytes"*.
+- `[IO.File]::WriteAllText` with `UTF8Encoding($false)` — `Set-Content -Encoding utf8` writes a BOM on PS 5.1, and the BOM turns the first `.env` key into `\uFEFFPC_AGENT_HOST`, which the server cannot read.
+
+**4. Start and verify**
 
 ```powershell
 .\start-pc-agent.bat
 curl.exe http://127.0.0.1:40000/health
 ```
 
-另开一台机器（宿主侧）：
+From the host machine:
 
 ```bash
-PC_AGENT_TOKEN='<token>' node smoke-test.mjs http://192.168.1.50:40000/mcp "$PC_AGENT_TOKEN"
+node smoke-test.mjs http://192.168.1.50:40000/mcp "$PC_AGENT_TOKEN"
 ```
 
-`smoke-test.mjs` 会先问服务端 `system_info` 拿平台，再决定发 `cmd` 还是 `bash` 命令——所以可以在一台 Mac 上验证一台 Windows 机器。
+The smoke test asks the server for `system_info` first, then picks `cmd` or `bash` commands accordingly — so you can validate a Windows box from a Mac.
 
-### 5. 开机自启（不依赖登录）
+**5. Auto-start without anyone logging in**
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-autostart.ps1 -SkipFirewall -AtStartup
 ```
 
-- `-AtStartup`：开机 20 秒后自动启动，**不需要任何人登录**（见[坑 4](#坑-4停在登录界面就连不上)）
-- `-SkipFirewall`：如果你已有第三方防火墙（TinyWall、火绒等）统一管理，不要再塞 Windows 防火墙规则，避免两处打架
-- S4U 权限被拒时加 `-AsSystem`
-
-**验证真的不依赖登录**：注销到登录界面，从宿主机器探 `/health`。
+Then confirm it survives a logoff: sign out to the login screen and probe `/health` from the host.
 
 ---
 
-## 工具
+## Tools
 
-| 工具 | 用途 |
+| Tool | Purpose |
 |---|---|
-| `system_info` | 平台、CPU、内存、Node 版本、允许根目录、运行中的任务数 |
-| `list_dir` | 列目录，可递归，带大小/修改时间 |
-| `read_file` | 文本带行号读；二进制用 `encoding="base64"` + 字节偏移分段 |
-| `write_file` | 写入/追加，自动建父目录 |
-| `run_command` | 前台执行，返回退出码 + stdout/stderr + 耗时；超时杀整个进程树 |
-| `spawn_job` | 后台起任务，输出写日志文件，立刻返回 `jobId` |
-| `job_status` | 列任务 / 查单个任务的状态与日志尾部 |
-| `kill_job` | 杀任务及其子进程树 |
+| `system_info` | Platform, CPU, memory, Node version, allowed roots, running job count |
+| `list_dir` | List a directory, optionally recursive |
+| `read_file` | Text with line numbers; binary via `encoding="base64"` + byte offsets |
+| `write_file` | Write or append, creating parent directories |
+| `run_command` | Run and wait; returns exit code, stdout/stderr, duration; kills the process tree on timeout |
+| `spawn_job` | Start a background job, log to file, return a `jobId` immediately |
+| `job_status` | List jobs, or read one job's status and log tail |
+| `kill_job` | Kill a job and its children |
 
-### 为什么长任务要用 `spawn_job`
-
-渲染、FFmpeg 合成动辄十几分钟。用 `run_command` 硬等会让单次工具调用超时（多数客户端默认 60 秒），模型也会卡住。
-
-```text
-spawn_job  { command: "ffmpeg -y -framerate 24 -i frames\\%04d.png -c:v libx264 out.mp4" }
-→ { jobId: "2b334d3c", logFile: "..." }
-
-job_status { jobId: "2b334d3c", tailBytes: 20000 }
-→ { state: "running" | "exited", exitCode: 0, log: "frame 120/300 ..." }
-```
-
-日志尾部足以让模型判断进度，而不必阻塞。
+**Use `spawn_job` for anything slow.** A render or FFmpeg encode can run for tens of minutes; a blocking `run_command` will hit the client's tool timeout (60 s by default) and stall the conversation. Poll `job_status` instead — the log tail (`frame 120/300`) is enough to judge progress.
 
 ---
 
-## 客户端接入
+## Client setup
 
-### DeepSeek Harness
+**DeepSeek Harness**
 
 ```yaml
 - id: mcp-pc-agent
@@ -139,23 +119,19 @@ job_status { jobId: "2b334d3c", tailBytes: 20000 }
       Authorization: 'Bearer <token>'
     toolCallTimeoutMs: 600000
     failOnStartupError: false
-    reconnect:
-      enabled: true
-      maxAttempts: 100000     # 见坑 7
+    reconnect: { enabled: true, maxAttempts: 100000 }
 ```
 
-工具会以 `mcp__pc__<tool>` 出现。
+Tools appear as `mcp__pc__<tool>`.
 
-### Claude Code
+**Claude Code**
 
 ```bash
 claude mcp add --transport http pc-agent http://192.168.1.50:40000/mcp \
   --header "Authorization: Bearer <token>"
 ```
 
-### Claude Desktop
-
-Desktop 的 `claude_desktop_config.json` 只吃 stdio 启动器，远程 HTTP 需要桥：
+**Claude Desktop** only accepts stdio launchers; bridge it:
 
 ```json
 {
@@ -172,175 +148,73 @@ Desktop 的 `claude_desktop_config.json` 只吃 stdio 启动器，远程 HTTP �
 
 ---
 
-## Windows 上的七个坑
+## The seven Windows traps
 
-这一节是本文档存在的主要理由。每一条都实际踩过。
+This section is the main reason this document exists. Each one was hit for real.
 
-### 坑 1：`.ps1` 脚本里的中文全是乱码
+**1 — Chinese in `.ps1` renders as garbage.**
+Windows PowerShell 5.1 decodes BOM-less UTF-8 as ANSI/GBK. Save scripts containing non-ASCII as **UTF-8 with BOM**.
 
-**症状**：`Write-Host "已注册计划任务"` 输出成乱码。
+**2 — A `.bat` prints `'delims' is not recognized as an internal or external command`.**
+`cmd.exe` parses batch files with the OEM code page (936/GBK on zh-CN). UTF-8 Chinese bytes get re-split as GBK and corrupt whole lines, including `rem` and `for /f`. Keep batch files **pure ASCII with CRLF line endings**.
 
-**根因**：Windows PowerShell 5.1（.NET Framework）读取**无 BOM** 的 UTF-8 脚本时按 ANSI/GBK 解码。
+**3 — Command output turns into `����`.**
+`cmd.exe` emits GBK; the server decodes UTF-8. This build prefixes `chcp 65001 >nul &` to every `cmd` invocation and falls back to `TextDecoder('gbk')` when UTF-8 yields replacement characters. This matters more than it looks: Python and FFmpeg errors on Windows are largely Chinese.
 
-**修法**：含非 ASCII 字符的 `.ps1` 一律存成 **UTF-8 with BOM**。PowerShell 7 能读无 BOM，5.1 不能。
+**4 — Unreachable at the login screen.**
+An `-AtLogOn` scheduled task only starts when someone logs in. `ping` works and `445` is open, but `40000` times out. Use `-AtStartup` with an S4U principal — runs at boot, needs no password, needs nobody logged in.
 
----
+**5 — The task dies with `0xC000013A`.**
+That is `STATUS_CONTROL_C_EXIT`. In `AtLogOn` mode the process lives in your interactive session with a visible console window; closing that window sends `CTRL_CLOSE_EVENT` to the whole console group. Same fix as #4: S4U runs in Session 0 with no console, so nobody can close it.
 
-### 坑 2：`.bat` 满屏「不是内部或外部命令」
+**6 — `npm install` fails with `EACCES`.**
+Ignore npm's "file in use / antivirus / run as administrator" hint — that is its generic text for every `EACCES`. Read the stack: it fails inside `FetchError`, i.e. while *connecting*, before touching disk. On Windows this is a security suite (TinyWall, 360, Huorong, EDR) blocking `node.exe` outbound. Whitelist `node.exe`.
+*Diagnostic shortcut:* `curl.exe -I https://registry.npmjs.org/` succeeds but `node -e "fetch(...)"` fails → per-process blocking.
 
-**症状**：
+**7 — The client goes permanently `disconnected`.**
+MCP clients share one reconnect budget per outage (`reconnect.maxAttempts`). At the default 30 attempts with 0.5 s→30 s backoff it is exhausted in ~12 minutes, after which reconnection stops until the config is reloaded. For a machine that shuts down and sleeps, set `maxAttempts` very high.
 
-```
-'…rem' 不是内部或外部命令
-'null' 不是内部或外部命令
-'delims' 不是内部或外部命令
-'de' 不是内部或外部命令
-```
+Two more diagnostic habits:
 
-**根因**：`cmd.exe` 用 OEM 代码页（中文系统 936/GBK）解析 `.bat`。UTF-8 的中文字节被按 GBK 重新拆字，把 `rem` / `for /f` 这些行整个污染了。次要原因：LF-only 行尾在 `if (...)` 块和 `for /f` 上也有已知解析问题。
-
-**修法**：`.bat` **纯 ASCII + CRLF**。日志文案用英文，别用中文。
-
----
-
-### 坑 3：命令输出的中文变成 `����`
-
-**症状**：
-
-```
-stderr: "'uname' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���"
-```
-
-**根因**：`cmd.exe` 输出 GBK，服务端按 UTF-8 解码。
-
-**修法**（本项目已内置两条）：
-
-1. `cmd` 命令自动前置 `chcp 65001 >nul &`，让 cmd 自身的提示走 UTF-8
-2. 解码时先试 UTF-8；替换字符（`U+FFFD`）超过 0.5% 就回退 `TextDecoder('gbk')`
-
-这个坑比看起来重要：Windows 上 Python、FFmpeg 的报错大量是中文，模型看到一屏 `�` 就等于瞎了。
+- **Timeout ≠ refusal.** `Connection timed out` means packets are dropped (firewall); `Connection refused` means nothing is listening. Opposite directions.
+- **A client's tool set is a per-session snapshot.** After installing or reloading an MCP dependency, the current session will not see the new tools — start a new session.
 
 ---
 
-### 坑 4：停在登录界面就连不上
+## Security
 
-**症状**：重启后不登录桌面，`ping` 通、`445` 通，但 `40000` 超时。
+**This server is a root shell on that machine, wrapped in HTTP.** Every design decision follows from that.
 
-**根因**：计划任务用的 `-AtLogOn` 触发器。它只在**有登录会话**时启动任务。
-
-**修法**：改用 `-AtStartup`（本项目 `install-autostart.ps1` 已支持）：
-
-```powershell
-$trig = New-ScheduledTaskTrigger -AtStartup; $trig.Delay = 'PT20S'
-$prin = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Highest
-Set-ScheduledTask -TaskName PcAgentMcp -Trigger $trig -Principal $prin
-```
-
-S4U = Service-for-User，用你的账户身份运行但**不需要登录，也不需要存密码**。
-
----
-
-### 坑 5：任务结果 `0xC000013A`，服务莫名死掉
-
-**症状**：`Get-ScheduledTaskInfo` 显示 `LastTaskResult = 3221225786`（`0xC000013A`），进程消失。
-
-**根因**：`0xC000013A` = `STATUS_CONTROL_C_EXIT`。`AtLogOn` 模式下进程跑在你的交互会话里、带一个可见的控制台窗口；**关掉那个窗口**会让 Windows 给整个控制台组发 `CTRL_CLOSE_EVENT`，服务跟着死。
-
-**修法**：同坑 4。S4U/SYSTEM 跑在 **Session 0**，没有控制台，也就没人能误关。
-
----
-
-### 坑 6：`npm install` 报 `EACCES`
-
-**症状**：
-
-```
-npm error code EACCES
-npm error FetchError: request to https://registry.npmjs.org/... failed
-npm error The operation was rejected by your operating system.
-npm error It's possible that the file was already in use (by a text editor or antivirus)
-```
-
-**根因**：先把 npm 那段「文件被占用 / 杀毒软件 / 用管理员运行」的提示忘掉——它是所有 `EACCES` 的通用套话。看堆栈：失败点在 `FetchError`，是**建立连接时**被操作系统拒绝，还没碰磁盘。Windows 上 Node 拿 `WSAEACCES` 通常是安全软件（TinyWall、360、火绒、企业 EDR）按进程拦截出站。
-
-**修法**：把 `node.exe` 加进安全软件的出站白名单。
-
-**诊断捷径**：`curl.exe -I https://registry.npmjs.org/` 能通、但 `node -e "fetch('https://registry.npmjs.org/')"` 报 `EACCES` → 就是按进程拦截（curl 和 node 是两个二进制）。
-
----
-
-### 坑 7：客户端突然永久 `disconnected`
-
-**症状**：执行机器恢复后，MCP 客户端仍报 `server is disconnected`，怎么等都不重连。
-
-**根因**：MCP 客户端（如 `@deepseek-ai/dsh-mcp-client`）的 `reconnect.maxAttempts` 是**每次故障共享一个预算**。默认 30 次、退避 0.5s→30s，大约 12 分钟耗尽；之后**停止重连**，必须重载配置或重启宿主才恢复。
-
-**修法**：对"会关机、会睡眠"的机器，把 `maxAttempts` 调到很大（如 `100000`）。恢复方式：重载该 bundle/条目（DSH 里关掉再打开）。
-
----
-
-### 附：两个诊断经验
-
-- **超时 ≠ 拒绝。** `Connection timed out` = 包被静默丢弃（防火墙）；`Connection refused` = 没进程监听。方向完全不同，别混。
-- **客户端工具集是会话级快照。** 新装或重载 MCP 依赖后，**当前会话看不到新工具**，要新开会话。
-
----
-
-## 安全模型
-
-**这个服务等于那台机器的 root shell，只是包了一层 HTTP。** 所有设计都以此为前提。
-
-| 层 | 机制 | 作用 |
+| Layer | Mechanism | Purpose |
 |---|---|---|
-| 网络 | 只在内网 | 不暴露到公网（**绝不做端口映射**） |
-| 来源 | `PC_AGENT_ALLOWED_IPS` | 只接受指定客户端 IP |
-| 请求 | Host 头校验 | 防 DNS rebinding；启动时自动并入本机所有 IP |
-| 认证 | Bearer token（32 字节随机） | 恒定时间比较；无 token 时拒绝绑定非回环地址 |
-| 文件 | `PC_AGENT_ROOTS` 路径围栏 | `path.relative` 判断，越界直接拒绝 |
+| Network | LAN only | Never expose it publicly, never port-forward |
+| Source | `PC_AGENT_ALLOWED_IPS` | Only the client machine may connect |
+| Request | Host header validation | DNS-rebinding protection; all local IPs merged in at startup |
+| Auth | Bearer token (32 random bytes) | Constant-time compare; refuses to bind a non-loopback address without one |
+| Files | `PC_AGENT_ROOTS` jail | `path.relative` check; out-of-root access is rejected |
 
-### 它挡不住的
+What it does **not** protect against:
 
-- **符号链接 / junction**：路径围栏是字符串层的，不解析链接目标。真有隔离需求就用独立用户 + NTFS ACL。
-- **`run_command` 本身**：它就是设计来执行任意命令的。路径围栏只约束"文件工具"，不约束 shell。
-- **token 泄漏**：静态 token，无过期、无速率限制、无锁定。泄漏 = 永久 shell。
+- **Symlinks / junctions.** The jail is lexical; it does not resolve link targets. For real isolation use a dedicated user plus NTFS ACLs.
+- **`run_command` itself.** It exists to execute arbitrary commands. The jail constrains the file tools, not the shell.
+- **Token leakage.** Static token, no expiry, no rate limit, no lockout. Leak = permanent shell.
 
-### 需要远程访问时
-
-**不要做端口映射。** 用 VPN（WireGuard / Tailscale）——不开任何端口、端到端加密、只有你的设备能连，网络层直接替代 `ALLOWED_IPS` 这一层。Cloudflare Tunnel + Access 是另一个可选项。
+**If you need remote access, do not forward the port.** Use a VPN (WireGuard / Tailscale): no open ports, encrypted transport, only your devices can reach it, and the network layer replaces `ALLOWED_IPS`. Cloudflare Tunnel + Access is a reasonable alternative.
 
 ---
 
-## 设计取舍
+## Design notes
 
-**为什么无状态？** 每个请求新建 transport（`sessionIdGenerator: undefined`）。代价是用不了 `subscriptions/listen` 这类长连订阅；收益是那台机器重启、进程崩溃、网络闪断，客户端下一次请求就自动恢复，不需要 reconnect 握手。对一个会关机的 PC，这笔交易划算。
+**Why stateless?** A fresh transport per request (`sessionIdGenerator: undefined`). You give up long-lived subscriptions (`subscriptions/listen`); you gain automatic recovery when the worker reboots, crashes, or the network blips — no reconnect handshake involved. For a machine that shuts down, that trade is worth it.
 
-**为什么不用 WebSocket？** MCP 规范只定义 stdio 和 Streamable HTTP。没有 WS 传输，硬套只会让客户端连不上。
+**Why not WebSocket?** MCP defines stdio and Streamable HTTP only. There is no WebSocket transport; forcing one merely breaks clients.
 
-**为什么前台/后台两套工具？** `run_command` 适合秒级到分钟级；`spawn_job` 把输出重定向到日志文件、立刻返回。让模型自己选，比给它一个"超时很长"的阻塞调用更好——后者会把整个对话卡住。
+**Why two execution tools?** `run_command` covers seconds to minutes. `spawn_job` redirects output to a file and returns immediately. Handing the model one "blocking call with a very long timeout" instead would stall the whole conversation.
 
-**为什么服务端自己做路径围栏？** 因为 `PC_AGENT_ROOTS` 是部署者的意图表达，不该依赖客户端自觉。
+**Why does the server police the path jail itself?** `PC_AGENT_ROOTS` expresses the deployer's intent. It should not depend on the client behaving.
 
 ---
 
-## 文件清单
+## Licence
 
-| 文件 | 作用 |
-|---|---|
-| `server.mjs` | 全部逻辑：8 个工具 + HTTP 入口 + 鉴权 + 路径围栏 + 编码处理 |
-| `package.json` | 依赖：`@modelcontextprotocol/server` ^2、`@modelcontextprotocol/node` ^2、`zod` ^4 |
-| `.env.example` | 配置模板 |
-| `start-pc-agent.bat` | 前台启动（**排错用**；已部署实例请用计划任务） |
-| `install-autostart.ps1` | 计划任务（`-AtStartup` / `-AsSystem`）+ 防火墙 + `-Uninstall` |
-| `smoke-test.mjs` | 端到端自检，按对端平台选命令 |
-| `.gitattributes` | 保持 `.bat` / `.ps1` 的原始字节（BOM 与 CRLF 不能丢） |
-| `docs/architecture.*.svg` | 架构图（中 / 英），README 顶部引用 |
-
-## 验证状态
-
-服务端在 macOS + Node 24/26 与本仓库目标环境（Windows 11 + Node 26）上跑通完整链路：`tools/list`、文件读写、`run_command`、`spawn_job` → `job_status`、超时杀进程树、401/403 鉴权、路径越界拦截、GBK 解码、S4U 开机自启（登录界面下可从另一台机器访问）。
-
-协议层用 MCP TypeScript SDK **v2**（2026-07-28 规范）。
-
-## 许可
-
-MIT，见 [LICENSE](LICENSE)。
+MIT — see [LICENSE](LICENSE).
